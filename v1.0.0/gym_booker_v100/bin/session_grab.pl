@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
 #
-# -------------- Virgin Active Class Session Grabber -------------- 
+# -------------- Virgin Active Class Session Grabber -------------- v1.0.1
 # Created by Eddy - JayAristocles@gmail.com - www.makeitbreakitfixit.com - 09/2014
 #
 # Virgin Active health club allows bookings of its classes up to 7 days in advance,
@@ -19,10 +19,19 @@
 # - Grab class list
 # - Book classes according to time/class set by user
 #
+# BUG FIXES / CHANGES:
 #
+# v1.0.1
+# - Added message to inform user of booking failure due to too many classes being booked
+# - Site shows 8 days in advance if past 8pm, otherwise just 7 days. This would break the
+#   script so added some code to fix it.
+# - Added a little colour to the stdout text to make it look pretty
+
 
 use strict;
 use warnings;
+use Term::ANSIColor;
+#use diagnostics;
 
 use VirginClass;
 use WWW::Mechanize;
@@ -35,7 +44,9 @@ use Scalar::Util qw(looks_like_number);
 main();
 
 sub main {
+  print color 'bold blue'; # Colourful text! wee!
   printf("******* Running $0 *******\n");
+  print color 'reset'; # Back to boring text
   ###########################################################################################
   # Below variable is the only one that needs to be customised. All other config should be
   # changed within the puncher cfg file.
@@ -130,25 +141,39 @@ sub main {
   $mech->click(); # Submit the form
 
   # Navigate to appropriate page
-  my $numOfDaysInFuture = '8'; # Number of days to look ahead in class schedule
-  $mech->follow_link(url_regex => qr/bookaclass/i); # Finds a link with 'bookaclass' in it, follows it
-  $mech->submit_form(
-    with_fields => { # Select 7th days class list
-      'ctl00$ctl00$phPage$phPage1$ddlDate' => $numOfDaysInFuture
+  my $response = $mech->follow_link(url_regex => qr/bookaclass/i); # Finds a link with 'bookaclass' in it, follows it
+  my @content = getContent($response); # Holds the HTTP page with booking menu in it
+
+  #print($mech->response->as_string); # Debug - Print HTML response to screen
+
+  # The booking page will display 7 days in advance, but will show you the 8th day after 8pm.
+  # This presents a slight problem when choosing which day to select, if we pick 8th day and
+  # the form doesn show that day, then we get an error. $mech->select() doesnt help with its
+  # return codes (always showing TRUE, even when option is not present). So instead we will
+  # parse the HTTP page and scrape the number of days (options) are available, and pick the
+  # last one.
+  my $daysCounter = 0; # Used to store the number of days in to the future we can see the class schedule
+  for (my $x = 0; $x < $#content; $x++) {
+    if ($content[$x] =~ m/ctl00\$ctl00\$phPage\$phPage1\$ddlDate/) { # Fine the correct HTTP <select>
+      while($content[$x+1] =~ m/<option/) { # Iterate the counter per HTTP <option> tag found
+        $x++;
+        $daysCounter++;
+      }
+    }
+  }
+  print("Found classes up to " . ($daysCounter - 1) . " days in advance\n") if ($daysCounter)
+    || die ("[ERR] Couldn't find form object to select day to view classes\n");
+
+  $mech->submit_form( # Select the day from the dropdown list box
+    with_fields => {
+      'ctl00$ctl00$phPage$phPage1$ddlDate' => ($daysCounter - 1)
     }
   );
-  my $response = $mech->click(); # Submit the form
-  my $content; # This will hold the HTTP page with all the classes in it
+  $response = $mech->click(); # Submit the form, retrieve response
 
-  if ($response->is_success) {
-    $content = $response->as_string;
-  } else {
-    print("[ERR] Unable to grab class list\n");
-    exit 0;
-  }
 
   # ------- Iterate through the returned content and pull out all the classes -------
-  my @classes = split /\n/, $content;
+  my @classes = getContent($response); # Holds the HTTP page with list of classes in it
   my $numOfClasses = 0;
   my @siteClasses;
   my $date;
@@ -166,10 +191,10 @@ sub main {
       $numOfClasses++;
       while ($classes[$i] !~ m/^\s*<\/li>\s*$/) { # Keep iterating until we read the end of the </li>
         # Grab all the class information from the next few lines in HTTP content
-        if ($classes[$i] =~ m/^\s*<a.* href="(.*)">/)                     {$href = $1;}
-        if ($classes[$i] =~ m/^\s*<h1 style=.*?>([\w\s\-\/]+).*?<\/h1>/)   {$name = $1;}
-        if ($classes[$i] =~ m/^\s*<p class="\w+">(\d+:\d+[AP]M).*?(\d+)/) {$time = $1; $length = $2;}
-        if ($classes[$i] =~ m/^\s*<p>([\w\s]+)\s*\/\s*([\w\s-]+?)<\/p>/)  {$location = $1; $instructor = $2;}
+        if ($classes[$i] =~ m/^\s*<a.* href="(.*)">/)                     {$href = $1;} # Booking URL
+        if ($classes[$i] =~ m/^\s*<h1 style=.*?>([\w\s\-\/]+).*?<\/h1>/)  {$name = $1;} # Class name
+        if ($classes[$i] =~ m/^\s*<p class="\w+">(\d+:\d+[AP]M).*?(\d+)/) {$time = $1; $length = $2;} # Run length & start time
+        if ($classes[$i] =~ m/^\s*<p>([\w\s]+)\s*\/\s*([\w\s-]+?)<\/p>/)  {$location = $1; $instructor = $2;} # Room & Instructor
         $hot = 0 if ($classes[$i] =~ m/visibility:hidden/); # Disable flag if hot icon is hidden
         $i++; # Keep iterating the existing 'for' loop
       }
@@ -204,8 +229,8 @@ sub main {
       }
     }
   }
-  printf("\nDONE. Successfully booked %d classes\n", $bookings);
-  printf("******* Ending $0 *******\n");
+  printf("\nDONE. Successfully booked %d class(es)\n", $bookings);
+  print color 'bold blue'; printf("******* Ending $0 *******\n"); print color 'reset';
 }
 
 # Expects the URL and the Mechanize object. Using the URL will GET it and then book the class.
@@ -221,15 +246,35 @@ sub bookClass {
       $response = $mech->submit_form(button => $1);
       if ($response->is_success) {
         $content = $response->as_string;
+        print color 'bold green'; # Change text colour
         printf("SUCCESS! Class booked, check email for confirmation.\n\n\n") if ($content =~ m/<h1>Success<\/h1>/);
+        print color 'reset'; # Text back to standard
         return 1;
       } else {printf("Failed. Undefined response. Check email to see if you are booked.\n");}
     } else {
+      print color 'bold red'; # Change text colour
       printf("Failed.");
-      printf(" You are already booked for this class.\n") if ($content =~ m/No need to book,/);
+      printf(" You are already booked for this class.\n")      if ($content =~ m/No need to book,/);
       printf(" Double-booking. Delete other booking first.\n") if ($content =~ m/This class clashes/);
+      printf(" You have too many booked classes.\n")           if ($content =~ m/you love our classes/);
+      print color 'reset'; # Text back to standard
     }
   } else {printf("Failed. There was a problem parsing the URL to book the class\n");}
   printf("\n\n");
   return 0;
+}
+
+# Expects a HTTP::Response object and returns an array, each element is a line in the HTTP response.
+# Exits script on failure.
+sub getContent {
+  my $response = shift;
+
+  if ($response->is_success) {
+    my $content = $response->as_string;
+    my @c = split /\n/, $content; # Otherwise return as an array (split by newline)
+    return @c;
+  } else {
+    print("[ERR] Unable to extract HTTP page from response\n");
+    exit 0;
+  }
 }
